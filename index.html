@@ -7,7 +7,7 @@
 <style>
   :root { --bg:#0b1020; --fg:#e8ecf5; --muted:#8a94ad; --card:#151c33; --accent:#4f7cff; }
   @media (prefers-color-scheme: light) {
-    :root:not([data-theme="dark"]) { --bg:#f4f6fb; --fg:#15192b; --muted:#5b6478; --card:#ffffff; }
+    :root { --bg:#f4f6fb; --fg:#15192b; --muted:#5b6478; --card:#ffffff; }
   }
   * { box-sizing: border-box; }
   body {
@@ -16,48 +16,60 @@
     display: flex; justify-content: center; padding: 16px;
   }
   .wrap { width: 100%; max-width: 420px; text-align: center; padding-top: 24px; }
+  .tag { color: var(--accent); font-size: .85rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
   .clock { font-size: 3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .sub { color: var(--muted); font-size: .95rem; margin-top: 4px; }
   .card { background: var(--card); border-radius: 16px; padding: 20px; margin-top: 20px; }
   .label { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; }
-  .moon { display: block; width: 140px; height: 140px; margin: 12px auto 4px; }
+  .moon-row { display: flex; align-items: center; justify-content: space-between; }
+  .moon { width: 140px; height: 140px; margin: 12px 0 4px; }
   .phase { font-size: 1.4rem; font-weight: 600; margin-top: 4px; }
   .times { display: flex; gap: 12px; margin-top: 10px; }
   .times > div { flex: 1; }
-  .time-val { font-size: 1.25rem; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
-  .status { color: var(--muted); margin-top: 18px; font-size: .9rem; min-height: 1.2em; }
-  button {
-    margin-top: 10px; padding: 10px 18px; border: 0; border-radius: 10px;
-    background: var(--accent); color: #fff; font-size: 1rem;
+  .val { font-size: 1.25rem; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .status { color: var(--muted); margin-top: 18px; font-size: .9rem; }
+  button { border: 0; border-radius: 10px; font-size: 1rem; }
+  #retry { margin-top: 10px; padding: 10px 18px; background: var(--accent); color: #fff; }
+  .nav {
+    width: 64px; height: 110px; padding: 0; flex-shrink: 0; border-radius: 14px;
+    background: transparent; color: var(--fg); font-size: 3.6rem; line-height: 1;
+    touch-action: manipulation;   /* no double-tap zoom delay */
   }
+  .nav:active { background: var(--bg); }
+  .nav:disabled { opacity: .2; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="tag" id="dayTag">Today</div>
   <div class="clock" id="clock">--:--:--</div>
   <div class="sub" id="date"></div>
   <div class="sub" id="place">Locating…</div>
 
   <div class="card">
     <div class="label">Moon phase</div>
-    <svg class="moon" viewBox="0 0 100 100" aria-hidden="true">
-      <circle cx="50" cy="50" r="48" fill="#5a5f6b"/>
-      <path id="moonLit" fill="#f5d33f" d=""/>
-    </svg>
+    <div class="moon-row">
+      <button class="nav" id="prev" aria-label="Yesterday">‹</button>
+      <svg class="moon" viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="48" fill="#5a5f6b"/>
+        <path id="moonLit" fill="#f5d33f"/>
+      </svg>
+      <button class="nav" id="next" aria-label="Tomorrow">›</button>
+    </div>
     <div class="phase" id="phase">…</div>
   </div>
 
   <div class="card">
-    <div class="label">Today's moon events (your location)</div>
+    <div class="label" id="evLabel">Today's moon events (your location)</div>
     <div class="times">
-      <div><div class="label">Moonrise</div><div class="time-val" id="rise">—</div></div>
-      <div><div class="label">Moonset</div><div class="time-val" id="set">—</div></div>
+      <div><div class="label">Moonrise</div><div class="val" id="rise">—</div></div>
+      <div><div class="label">Moonset</div><div class="val" id="set">—</div></div>
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" id="skyCard">
     <div class="label">Where to look right now</div>
-    <div class="time-val" id="skyMain">—</div>
+    <div class="val" id="skyMain">—</div>
     <div class="sub" id="skyTip"></div>
   </div>
 
@@ -66,239 +78,214 @@
 </div>
 
 <script>
-// ==ASTRO (pure functions, no DOM)
+// ===== Astronomy (low-precision Sun/Moon theory after P. Schlyter; checked against USNO) =====
 const RAD = Math.PI / 180, DEG = 180 / Math.PI;
 const norm = x => ((x % 360) + 360) % 360;
-const S = x => Math.sin(x * RAD);
+const S = x => Math.sin(x * RAD), C = x => Math.cos(x * RAD);
 
-function julian(date) { return date.getTime() / 86400000 + 2440587.5; }
+// Days since 2000 Jan 0.0 UT (the epoch these orbital elements use)
+const dayNum = date => date.getTime() / 86400000 + 2440587.5 - 2451543.5;
 
-// Sun: mean anomaly Ms, mean longitude Ls, ecliptic longitude (deg) — low-precision (Schlyter)
-function sunState(d) {
-  const Ms = norm(356.0470 + 0.9856002585 * d);
-  const ws = norm(282.9404 + 4.70935e-5 * d);
-  const Ls = norm(Ms + ws);
-  return { Ms, Ls, lon: norm(Ls + 1.915 * S(Ms) + 0.020 * S(2 * Ms)) };
-}
+// Moon position for day number d: RA/Dec (rad), distance (Earth radii), elongation from Sun (deg)
+function moon(d) {
+  const N = 125.1228 - 0.0529538083 * d;           // ascending node
+  const w = 318.0634 + 0.1643573223 * d;           // argument of perigee
+  const M = norm(115.3654 + 13.0649929509 * d);    // mean anomaly
+  const Ms = norm(356.0470 + 0.9856002585 * d);    // Sun mean anomaly
+  const Ls = Ms + 282.9404 + 4.70935e-5 * d;       // Sun mean longitude
+  const sunLon = Ls + 1.915 * S(Ms) + 0.020 * S(2 * Ms);
+  const a = 60.2666, e = 0.0549, inc = 5.1454;
 
-// Moon: geocentric equatorial RA/Dec (rad), distance (Earth radii), ecliptic lon (deg)
-function moonState(d) {
-  const N = norm(125.1228 - 0.0529538083 * d);
-  const i = 5.1454;
-  const w = norm(318.0634 + 0.1643573223 * d);
-  const a = 60.2666, e = 0.0549;
-  const M = norm(115.3654 + 13.0649929509 * d);
-  const sun = sunState(d);
-  const Mr = M * RAD;
-  const E = Mr + e * Math.sin(Mr) * (1 + e * Math.cos(Mr));
+  const E = M * RAD + e * S(M) * (1 + e * C(M));   // eccentric anomaly (rad)
   const xv = a * (Math.cos(E) - e), yv = a * Math.sqrt(1 - e * e) * Math.sin(E);
-  const v = Math.atan2(yv, xv) * DEG;
-  const r = Math.sqrt(xv * xv + yv * yv);
-  const vw = (v + w) * RAD, NR = N * RAD, iR = i * RAD;
-  const xh = r * (Math.cos(NR) * Math.cos(vw) - Math.sin(NR) * Math.sin(vw) * Math.cos(iR));
-  const yh = r * (Math.sin(NR) * Math.cos(vw) + Math.cos(NR) * Math.sin(vw) * Math.cos(iR));
-  const zh = r * Math.sin(vw) * Math.sin(iR);
-  let lon = Math.atan2(yh, xh) * DEG;
-  let lat = Math.atan2(zh, Math.sqrt(xh * xh + yh * yh)) * DEG;
+  const r = Math.hypot(xv, yv);
+  const u = Math.atan2(yv, xv) * DEG + w;           // argument of latitude
+  const xh = C(N) * C(u) - S(N) * S(u) * C(inc);
+  const yh = S(N) * C(u) + C(N) * S(u) * C(inc);
+  const zh = S(u) * S(inc);
 
-  // Main perturbations (Sun/Moon interaction)
-  const Lm = norm(N + w + M);
-  const D = norm(Lm - sun.Ls), F = norm(Lm - N);
-  lon += -1.274 * S(M - 2 * D) + 0.658 * S(2 * D) - 0.186 * S(sun.Ms)
-       - 0.059 * S(2 * M - 2 * D) - 0.057 * S(M - 2 * D + sun.Ms) + 0.053 * S(M + 2 * D)
-       + 0.046 * S(2 * D - sun.Ms) + 0.041 * S(M - sun.Ms) - 0.035 * S(D)
-       - 0.031 * S(M + sun.Ms) - 0.015 * S(2 * F - 2 * D) + 0.011 * S(M - 4 * D);
-  lat += -0.173 * S(F - 2 * D) - 0.055 * S(M - F - 2 * D) - 0.046 * S(M + F - 2 * D)
-       + 0.033 * S(F + 2 * D) + 0.017 * S(2 * M + F);
-  lon = norm(lon);
+  // Main perturbations
+  const Lm = N + w + M, D = Lm - Ls, F = Lm - N;
+  const lon = Math.atan2(yh, xh) * DEG
+    - 1.274 * S(M - 2 * D) + 0.658 * S(2 * D) - 0.186 * S(Ms)
+    - 0.059 * S(2 * M - 2 * D) - 0.057 * S(M - 2 * D + Ms) + 0.053 * S(M + 2 * D)
+    + 0.046 * S(2 * D - Ms) + 0.041 * S(M - Ms) - 0.035 * S(D)
+    - 0.031 * S(M + Ms) - 0.015 * S(2 * F - 2 * D) + 0.011 * S(M - 4 * D);
+  const lat = Math.atan2(zh, Math.hypot(xh, yh)) * DEG
+    - 0.173 * S(F - 2 * D) - 0.055 * S(M - F - 2 * D) - 0.046 * S(M + F - 2 * D)
+    + 0.033 * S(F + 2 * D) + 0.017 * S(2 * M + F);
 
   // Ecliptic -> equatorial
-  const ecl = (23.439 - 0.00000036 * d) * RAD;
-  const lr = lon * RAD, br = lat * RAD;
-  const x = r * Math.cos(lr) * Math.cos(br);
-  const y = r * Math.sin(lr) * Math.cos(br);
-  const z = r * Math.sin(br);
-  const ye = y * Math.cos(ecl) - z * Math.sin(ecl);
-  const ze = y * Math.sin(ecl) + z * Math.cos(ecl);
-  return { ra: Math.atan2(ye, x), dec: Math.atan2(ze, Math.sqrt(x * x + ye * ye)), dist: r, lon };
+  const ecl = 23.439 - 3.6e-7 * d;
+  const x = C(lon) * C(lat), y = S(lon) * C(lat), z = S(lat);
+  const ye = y * C(ecl) - z * S(ecl), ze = y * S(ecl) + z * C(ecl);
+  return { ra: Math.atan2(ye, x), dec: Math.atan2(ze, Math.hypot(x, ye)), dist: r, elong: norm(lon - sunLon) };
 }
 
-// Geocentric altitude (deg) and horizontal parallax (deg) at a date/time
-function moonAltitude(date, lat, lon) {
-  const d = julian(date) - 2451543.5;   // Schlyter epoch: 2000 Jan 0.0
-  const m = moonState(d);
-  const gmst = norm(280.46061837 + 360.98564736629 * (julian(date) - 2451545.0));
-  const lst = norm(gmst + lon);
-  const ha = (lst - m.ra * DEG) * RAD;
-  const sinAlt = S(lat) * Math.sin(m.dec) + Math.cos(lat * RAD) * Math.cos(m.dec) * Math.cos(ha);
-  const azS = Math.atan2(Math.sin(ha), Math.cos(ha) * S(lat) - Math.tan(m.dec) * Math.cos(lat * RAD));
-  return { alt: Math.asin(sinAlt) * DEG, par: Math.asin(1 / m.dist) * DEG, az: norm(azS * DEG + 180) };
+// Moon altitude/azimuth (deg) and horizontal parallax (deg) for an observer
+function moonSky(date, lat, lon) {
+  const d = dayNum(date), m = moon(d);
+  const lst = 280.46061837 + 360.98564736629 * (d - 1.5) + lon;   // local sidereal time (deg)
+  const ha = lst * RAD - m.ra;
+  const alt = Math.asin(S(lat) * Math.sin(m.dec) + C(lat) * Math.cos(m.dec) * Math.cos(ha)) * DEG;
+  const az = norm(Math.atan2(Math.sin(ha), Math.cos(ha) * S(lat) - Math.tan(m.dec) * C(lat)) * DEG + 180);
+  return { alt, az, par: Math.asin(1 / m.dist) * DEG };
 }
 
-// Moon phase from elongation (Moon lon − Sun lon)
-function phaseInfo(date) {
-  const d = julian(date) - 2451543.5;   // Schlyter epoch: 2000 Jan 0.0
-  const elong = norm(moonState(d).lon - sunState(d).lon);
-  const table = [
-    [11.25, "New Moon", "🌑"], [78.75, "Waxing Crescent", "🌒"], [101.25, "First Quarter", "🌓"],
-    [168.75, "Waxing Gibbous", "🌔"], [191.25, "Full Moon", "🌕"], [258.75, "Waning Gibbous", "🌖"],
-    [281.25, "Last Quarter", "🌗"], [360, "Waning Crescent", "🌘"]
-  ];
-  for (const [limit, name, icon] of table) {
-    if (elong < limit || limit === 360) {
-      // 348.75–360 also maps to New Moon
-      if (limit === 360 && elong >= 348.75) return { name: "New Moon", icon: "🌑" };
-      return { name, icon };
-    }
-  }
-  return { name: "New Moon", icon: "🌑" };
+// Altitude seen from the ground, minus the standard rise/set threshold (refraction + moon radius)
+function horizonGap(date, lat, lon) {
+  const s = moonSky(date, lat, lon);
+  return s.alt - (0.7275 * s.par - 0.5667);
 }
 
-// All moonrise/moonset events within the local calendar day starting at dayStart
+const PHASES = [[11.25, "New Moon"], [78.75, "Waxing Crescent"], [101.25, "First Quarter"],
+  [168.75, "Waxing Gibbous"], [191.25, "Full Moon"], [258.75, "Waning Gibbous"],
+  [281.25, "Last Quarter"], [348.75, "Waning Crescent"], [360, "New Moon"]];
+const phaseName = el => PHASES.find(([lim]) => el < lim)[1];
+
+// Moonrise/moonset events within the local calendar day that starts at dayStart
 function moonEvents(lat, lon, dayStart) {
-  const dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1).getTime();
-  const f = t => { const a = moonAltitude(new Date(t), lat, lon); return a.alt - (0.7275 * a.par - 0.5667); };
-  const events = [];
-  const step = 10 * 60 * 1000;
+  const end = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1).getTime();
+  const f = t => horizonGap(new Date(t), lat, lon);
+  const step = 600000, events = [];        // scan every 10 min, then bisect to < 1 s
   let t0 = dayStart.getTime(), f0 = f(t0);
-  while (t0 < dayEnd) {
-    const t1 = Math.min(t0 + step, dayEnd);
-    const f1 = f(t1);
+  while (t0 < end) {
+    const t1 = Math.min(t0 + step, end), f1 = f(t1);
     if ((f0 < 0) !== (f1 < 0)) {
-      let a = t0, b = t1, fa = f0;
-      for (let k = 0; k < 30; k++) {
-        const m = (a + b) / 2, fm = f(m);
-        if ((fm < 0) === (fa < 0)) { a = m; fa = fm; } else { b = m; }
-      }
-      events.push({ type: f1 > 0 ? "rise" : "set", time: new Date((a + b) / 2) });
+      let a = t0, b = t1;
+      while (b - a > 500) { const m = (a + b) / 2; if ((f(m) < 0) === (f0 < 0)) a = m; else b = m; }
+      events.push({ rise: f1 > 0, time: new Date((a + b) / 2) });
     }
     t0 = t1; f0 = f1;
   }
   return events;
 }
-// ==UI
-const $ = id => document.getElementById(id);
-let pos = null, evKey = "", evList = [];
 
-function fmt(d) { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+// ===== Page =====
+const $ = id => document.getElementById(id);
+const fmt = d => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const COMPASS = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+const WORDS = { N: "north", E: "east", S: "south", W: "west" };
+const compass = az => COMPASS[Math.round(az / 22.5) % 16];
+const DAYS = { "-1": "Yesterday", "0": "Today", "1": "Tomorrow" };
+
+let pos = null, evKey = "", events = [];
+let offset = 0, viewTime = null;          // offset -1/0/+1; viewTime fixed at tap time ± 24 h
+const viewNow = () => viewTime ? new Date(viewTime) : new Date();
 
 function renderClock() {
-  const now = new Date();
+  const now = viewNow();
   $("clock").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
   $("date").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 }
 
 function renderPhase() {
-  const now = new Date();
-  const info = phaseInfo(now);
-  // Lit area: yellow; dark area: gray. Waxing lit on right, waning on left.
-  const d = julian(now) - 2451543.5;
-  const el = norm(moonState(d).lon - sunState(d).lon);
-  const R = 48, c = Math.cos(el * RAD), rx = Math.abs(c) * R;
-  const waxing = el < 180;
-  const limbSweep = waxing ? 1 : 0;
-  const termSweep = waxing ? (c > 0 ? 0 : 1) : (c > 0 ? 1 : 0);
-  $("moonLit").setAttribute("d",
-    `M50 2 A${R} ${R} 0 0 ${limbSweep} 50 98 A${rx.toFixed(2)} ${R} 0 0 ${termSweep} 50 2 Z`);
-  $("phase").textContent = info.name;
+  const el = moon(dayNum(viewNow())).elong;
+  // Yellow = lit. Lit limb on the right while waxing, left while waning (Northern Hemisphere view).
+  const c = C(el), waxing = el < 180;
+  const limb = waxing ? 1 : 0, term = (c > 0) === waxing ? 0 : 1;
+  $("moonLit").setAttribute("d", `M50 2A48 48 0 0 ${limb} 50 98A${(Math.abs(c) * 48).toFixed(2)} 48 0 0 ${term} 50 2Z`);
+  $("phase").textContent = phaseName(el);
 }
 
 function renderEvents() {
   if (!pos) return;
-  const now = new Date();
+  const now = viewNow();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const key = dayStart.toDateString() + "|" + pos.lat.toFixed(3) + "|" + pos.lon.toFixed(3);
-  if (key !== evKey) { evKey = key; evList = moonEvents(pos.lat, pos.lon, dayStart); }
-  const rises = evList.filter(e => e.type === "rise").map(e => fmt(e.time));
-  const sets = evList.filter(e => e.type === "set").map(e => fmt(e.time));
-  $("rise").textContent = rises.length ? rises.join(", ") : "None today";
-  $("set").textContent = sets.length ? sets.join(", ") : "None today";
-  renderSky();
+  const key = dayStart.getTime() + "|" + pos.lat.toFixed(3) + "|" + pos.lon.toFixed(3);
+  if (key !== evKey) { evKey = key; events = moonEvents(pos.lat, pos.lon, dayStart); }
+  const none = offset ? "None that day" : "None today";
+  const list = rise => events.filter(e => e.rise === rise).map(e => fmt(e.time)).join(", ") || none;
+  $("rise").textContent = list(true);
+  $("set").textContent = list(false);
+  if (!offset) renderSky(now);
 }
 
-const COMPASS = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
-const COMPASS_LONG = { N:"north", E:"east", S:"south", W:"west" };
-function renderSky() {
-  if (!pos) return;
-  const now = new Date();
-  const a = moonAltitude(now, pos.lat, pos.lon);
-  // Correct for viewing from Earth's surface (parallax) and the rim of the moon at the horizon
-  const alt = a.alt - a.par * Math.cos(a.alt * RAD);
-  const dir = COMPASS[Math.round(a.az / 22.5) % 16];
-  const dirWords = dir.split("").map(ch => COMPASS_LONG[ch]).join("-");
-  if (alt > -0.83) {   // same horizon rule as the rise/set times
-    const up = Math.max(0, alt);
-    const fists = up / 10;
-    $("skyMain").textContent = `Azimuth ${a.az.toFixed(1)}° (${dir}) · Altitude ${up.toFixed(1)}°`;
-    let height;
-    if (up < 5) height = "just above the horizon";
-    else if (up > 75) height = "nearly straight overhead";
-    else height = `about ${fists < 1.5 ? "one fist" : Math.round(fists) + " fists"} above the horizon (fist at arm's length ≈ 10°)`;
-    $("skyTip").textContent = `Face ${dirWords} and look ${height}.`;
+function renderSky(now) {
+  const s = moonSky(now, pos.lat, pos.lon);
+  const alt = s.alt - s.par * C(s.alt);   // as seen from Earth's surface
+  if (alt > -0.83) {                       // same horizon rule as rise/set
+    const up = Math.max(0, alt), dir = compass(s.az), fists = Math.round(up / 10);
+    const height = up < 5 ? "just above the horizon"
+      : up > 75 ? "nearly straight overhead"
+      : `about ${fists <= 1 ? "one fist" : fists + " fists"} above the horizon (fist at arm's length ≈ 10°)`;
+    $("skyMain").textContent = `Azimuth ${s.az.toFixed(1)}° (${dir}) · Altitude ${up.toFixed(1)}°`;
+    $("skyTip").textContent = `Face ${[...dir].map(ch => WORDS[ch]).join("-")} and look ${height}.`;
   } else {
-    const next = evList.find(e => e.type === "rise" && e.time > now);
+    const next = events.find(e => e.rise && e.time > now);
+    const raz = next && moonSky(next.time, pos.lat, pos.lon).az;
     $("skyMain").textContent = "Below the horizon";
     $("skyTip").textContent = next
-      ? (() => { const r = moonAltitude(next.time, pos.lat, pos.lon);
-          const rd = COMPASS[Math.round(r.az / 22.5) % 16];
-          return `It rises at ${fmt(next.time)} at azimuth ${r.az.toFixed(1)}° (${rd}).`; })()
+      ? `It rises at ${fmt(next.time)} at azimuth ${raz.toFixed(1)}° (${compass(raz)}).`
       : "It won't rise again before midnight.";
   }
 }
 
-function setStatus(msg) { $("status").textContent = msg; }
-
-function fail(msg) {
-  setStatus(msg);
-  $("retry").hidden = false;
-  $("rise").textContent = "—";
-  $("set").textContent = "—";
+function go(step) {
+  const n = Math.max(-1, Math.min(1, offset + step));
+  if (n === offset) return;
+  offset = n;
+  viewTime = offset ? Date.now() + offset * 86400000 : null;   // exactly 24 h from the tap
+  $("dayTag").textContent = DAYS[offset] + (offset ? (offset < 0 ? " (−24 h)" : " (+24 h)") : "");
+  $("evLabel").textContent = DAYS[offset] + "'s moon events (your location)";
+  $("skyCard").hidden = !!offset;
+  $("prev").disabled = offset === -1;
+  $("next").disabled = offset === 1;
+  renderClock(); renderPhase(); renderEvents();
 }
 
 function locate() {
   $("retry").hidden = true;
-  setStatus("Getting your location…");
-  if (!navigator.geolocation) { fail("Location is not available on this device/browser."); return; }
-  navigator.geolocation.getCurrentPosition(
-    p => {
-      pos = { lat: p.coords.latitude, lon: p.coords.longitude };
-      setStatus("Location: " + pos.lat.toFixed(2) + ", " + pos.lon.toFixed(2));
-      renderEvents();
-      lookupPlace(pos.lat, pos.lon);
-    },
-    err => { $("place").textContent = "Location unavailable"; fail("Could not get location (" + err.message + "). Allow location access, then retry."); },
-    { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 }
-  );
+  $("status").textContent = "Getting your location…";
+  if (!navigator.geolocation) return fail("Location is not available on this device/browser.");
+  navigator.geolocation.getCurrentPosition(p => {
+    pos = { lat: p.coords.latitude, lon: p.coords.longitude };
+    $("status").textContent = `Your location: ${pos.lat.toFixed(2)}, ${pos.lon.toFixed(2)}`;
+    renderEvents();
+    lookupPlace();
+  }, err => fail(`Could not get location (${err.message}). Allow location access, then retry.`),
+  { timeout: 15000, maximumAge: 600000 });
 }
 
-// Province/state + country. US: FCC Census Area API (.gov). Elsewhere/fallback: BigDataCloud free client geocoder.
-async function getJSON(url) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
-  try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) throw new Error(r.status); return await r.json(); }
-  finally { clearTimeout(timer); }
+function fail(msg) {
+  $("place").textContent = "Location unavailable";
+  $("status").textContent = msg;
+  $("retry").hidden = false;
 }
-async function lookupPlace(lat, lon) {
-  const coords = lat.toFixed(2) + ", " + lon.toFixed(2);
+
+// State/province + country: FCC Census Area API (.gov, US only), then BigDataCloud (worldwide)
+async function getJSON(url) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+async function lookupPlace() {
+  const { lat, lon } = pos;
   try {
-    const j = await getJSON(`https://geo.fcc.gov/api/census/area?lat=${lat}&lon=${lon}&format=json`);
-    const st = j.results && j.results[0] && j.results[0].state_name;
-    if (st) { $("place").textContent = st + ", United States"; return; }
-  } catch (e) { /* not in US or unreachable; try worldwide lookup */ }
+    const st = (await getJSON(`https://geo.fcc.gov/api/census/area?lat=${lat}&lon=${lon}&format=json`)).results?.[0]?.state_name;
+    if (st) return void ($("place").textContent = st + ", United States");
+  } catch {}
   try {
     const j = await getJSON(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
-    const parts = [j.principalSubdivision, j.countryName].filter(Boolean);
-    if (parts.length) { $("place").textContent = parts.join(", "); return; }
-  } catch (e) { /* fall through */ }
-  $("place").textContent = coords;
+    const place = [j.principalSubdivision, j.countryName].filter(Boolean).join(", ");
+    if (place) return void ($("place").textContent = place);
+  } catch {}
+  $("place").textContent = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
 }
 
-$("retry").addEventListener("click", locate);
+$("retry").onclick = locate;
+$("prev").onclick = () => go(-1);
+$("next").onclick = () => go(1);
 
 renderClock();
 renderPhase();
-setInterval(() => { renderClock(); }, 1000);
-setInterval(() => { renderPhase(); renderEvents(); }, 60000);
+let lastMinute = new Date().getMinutes();
+setInterval(() => {
+  if (offset) return;                      // yesterday/tomorrow views are fixed snapshots
+  renderClock();
+  const m = new Date().getMinutes();
+  if (m !== lastMinute) { lastMinute = m; renderPhase(); renderEvents(); }
+}, 1000);
 locate();
 </script>
 </body>
