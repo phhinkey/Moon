@@ -37,6 +37,11 @@
   }
   .nav:active { background: var(--bg); }
   .nav:disabled { opacity: .2; }
+  /* Yesterday/tomorrow view: whole page in grayscale, moon 20% smaller */
+  .wrap { transition: filter .25s; }
+  .moon { transition: width .25s, height .25s; }
+  .offday .wrap { filter: grayscale(1); }
+  .offday .moon { width: 112px; height: 112px; }
 </style>
 </head>
 <body>
@@ -163,20 +168,25 @@ function moonEvents(lat, lon, dayStart) {
 
 // ===== Page =====
 const $ = id => document.getElementById(id);
-const fmt = d => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+// Formatters built once instead of on every tick
+const fmtHM = new Intl.DateTimeFormat([], { hour: "numeric", minute: "2-digit" });
+const fmtHMS = new Intl.DateTimeFormat([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const fmtDate = new Intl.DateTimeFormat([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+const fmt = d => fmtHM.format(d);
 const COMPASS = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
 const WORDS = { N: "north", E: "east", S: "south", W: "west" };
 const compass = az => COMPASS[Math.round(az / 22.5) % 16];
 const DAYS = { "-1": "Yesterday", "0": "Today", "1": "Tomorrow" };
 
-let pos = null, evKey = "", events = [];
+let pos = null, events = [];
+const evCache = new Map();               // rise/set results per day+place, so paging days doesn't recompute
 let offset = 0, viewTime = null;          // offset -1/0/+1; viewTime fixed at tap time ± 24 h
 const viewNow = () => viewTime ? new Date(viewTime) : new Date();
 
 function renderClock() {
   const now = viewNow();
-  $("clock").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-  $("date").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  $("clock").textContent = fmtHMS.format(now);
+  $("date").textContent = fmtDate.format(now);
 }
 
 function renderPhase() {
@@ -193,7 +203,12 @@ function renderEvents() {
   const now = viewNow();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const key = dayStart.getTime() + "|" + pos.lat.toFixed(3) + "|" + pos.lon.toFixed(3);
-  if (key !== evKey) { evKey = key; events = moonEvents(pos.lat, pos.lon, dayStart); }
+  events = evCache.get(key);
+  if (!events) {
+    if (evCache.size > 6) evCache.clear();
+    events = moonEvents(pos.lat, pos.lon, dayStart);
+    evCache.set(key, events);
+  }
   const none = offset ? "None that day" : "None today";
   const list = rise => events.filter(e => e.rise === rise).map(e => fmt(e.time)).join(", ") || none;
   $("rise").textContent = list(true);
@@ -229,6 +244,7 @@ function go(step) {
   $("dayTag").textContent = DAYS[offset] + (offset ? (offset < 0 ? " (−24 h)" : " (+24 h)") : "");
   $("evLabel").textContent = DAYS[offset] + "'s moon events (your location)";
   $("skyCard").hidden = !!offset;
+  document.body.classList.toggle("offday", !!offset);
   $("prev").disabled = offset === -1;
   $("next").disabled = offset === 1;
   renderClock(); renderPhase(); renderEvents();
@@ -277,15 +293,20 @@ $("retry").onclick = locate;
 $("prev").onclick = () => go(-1);
 $("next").onclick = () => go(1);
 
-renderClock();
-renderPhase();
-let lastMinute = new Date().getMinutes();
-setInterval(() => {
-  if (offset) return;                      // yesterday/tomorrow views are fixed snapshots
-  renderClock();
-  const m = new Date().getMinutes();
-  if (m !== lastMinute) { lastMinute = m; renderPhase(); renderEvents(); }
-}, 1000);
+// Clock loop: fires just after each new second (no drift/skipped seconds),
+// does nothing while the screen is off or a past/future day is shown,
+// and refreshes moon data once per minute.
+let lastMinute = -1;
+function tick() {
+  if (!offset && !document.hidden) {
+    const now = new Date();
+    renderClock();
+    if (now.getMinutes() !== lastMinute) { lastMinute = now.getMinutes(); renderPhase(); renderEvents(); }
+  }
+  setTimeout(tick, 1005 - (Date.now() % 1000));
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) lastMinute = -1; });
+tick();
 locate();
 </script>
 </body>
